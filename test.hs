@@ -4,7 +4,10 @@ import Pipes
 import Pipes.Concurrent
 import qualified Pipes.Prelude as P
 import Data.Monoid
+
 import System.Console.ANSI
+import System.IO
+  
 import Debug.Trace
 
 -- this is all very quick n' dirty, just to play with composing
@@ -25,13 +28,14 @@ data Command = MoveLeft | MoveDown | MoveUp | MoveRight
              | MakeAttack     -- no info on target
              | MakeDamage Int -- hence we're gonna only damage ourselves
              | DisplayInfo
+               deriving(Show)
                
 data Event = Redraw Char Int Int Int Int
            | DrawInfo String
            | Attack Int Int
            | Damage Int
 
-renderer :: Consumer Event IO ()
+renderer :: Pipe Event Event IO ()
 renderer = forever $ do
   ev <- await
   case ev of
@@ -43,12 +47,16 @@ renderer = forever $ do
     DrawInfo msg -> lift $ do
       setCursorPosition 20 0
       putStr msg
-    Attack _ _ -> lift $ do
+    Attack _ _ -> do
+      lift $ do
         setCursorPosition 20 0
         putStr "Attack!"
-    Damage _ -> lift $ do
+      yield ev
+    Damage _ -> do
+      lift $ do
         setCursorPosition 20 0
-        putStr "Splash!"    
+        putStr "Splash!"
+      yield ev
 
 input :: Producer Command IO r
 input = forever $ do
@@ -72,7 +80,7 @@ data Entity = Entity { posX   :: Int
 handler :: Entity -> Pipe Command Event IO ()
 handler ent = loop ent
   where
-    loop Entity{posX=x, posY=y, avatar=av, target=(tx,ty), health=h} = do
+    loop ent@Entity{posX=x, posY=y, avatar=av, target=(tx,ty), health=h} = do
       when (h > 0) $ do
         cmd <- await
         let (tx,ty) = case cmd of
@@ -87,7 +95,7 @@ handler ent = loop ent
               _ -> h
         case cmd of
           MakeAttack -> yield $ Attack tx ty
-          DisplayInfo -> yield $ DrawInfo $ (show h)
+          DisplayInfo -> yield $ DrawInfo $ (show ent)
           _ -> yield $ Redraw av x y nx ny
         loop $ Entity nx ny av (nx+tx, ny+ty) nh
 
@@ -97,9 +105,8 @@ combat = forever $ do
   cmd <- await
   case cmd of
     Attack x y -> do
-      lift $ putStr "!"
       yield $ Damage 10
-    _ -> return ()
+    _ -> yield cmd
 
 -- not all 'output' subsystems are busy producing effects in IO
 -- some just want to produce commands for further processing
@@ -112,6 +119,8 @@ loopback = forever $ do
     _ -> return ()
     
 main = do
+  hSetBuffering stdin NoBuffering
+  hSetEcho stdin False
   clearScreen
   let player = Entity 0 0 '@' (0,1) 100
 
@@ -126,7 +135,5 @@ main = do
   -- handling subsystem
   forkIO $ do runEffect $ fromInput cmdIn >-> handler player >-> toOutput evOut
               performGC
-  -- here we are transfering events from output to the input
-  -- for the 'logic' subsystems that work in such manner
-  forkIO $ do runEffect $ fromInput evIn >-> combat >-> loopback >-> toOutput cmdOut
-  runEffect $ fromInput evIn >-> renderer
+  -- main flow of messages
+  runEffect $ fromInput evIn >-> combat >-> renderer >-> loopback >-> toOutput cmdOut
